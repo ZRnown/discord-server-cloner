@@ -39,14 +39,8 @@ class DiscordSelfClient:
     # ── Guilds ──
 
     async def get_manageable_guilds(self) -> list[discord.Guild]:
-        """Get all guilds the user can manage (MANAGE_GUILD permission or owner)."""
-        all_guilds = await self.client.fetch_guilds()
-        manageable = []
-        for g in all_guilds:
-            perms = g.me.guild_permissions if g.me else discord.Permissions.none()
-            if g.owner_id == self.user.id or perms.manage_guild:
-                manageable.append(g)
-        return manageable
+        """Get all guilds the user belongs to."""
+        return await self.client.fetch_guilds()
 
     # ── Channels ──
 

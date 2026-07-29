@@ -29,7 +29,7 @@ class WebhookManager:
         }
         total = len(text_entries)
         if total == 0:
-            self.progress_cb("No text channels to webhook...", 90)
+            self.progress_cb("没有需要设置 Webhook 的频道...", 90)
             return channel_mapping
 
         done = 0
@@ -65,10 +65,10 @@ class WebhookManager:
 
             done += 1
             self.progress_cb(
-                f"Setting up webhooks... ({done}/{total})",
+                f"正在设置 Webhook... ({done}/{total})",
                 80 + int(15 * done / total),
             )
             await asyncio.sleep(0.6)
 
-        self.progress_cb("Webhooks setup complete!", 95)
+        self.progress_cb("Webhook 设置完成！", 95)
         return channel_mapping

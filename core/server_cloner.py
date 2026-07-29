@@ -28,10 +28,10 @@ class ServerCloner:
         self.mapping: dict[int, dict] = {}
 
     async def clone(self, source_guild_id: int, target_guild_id: int) -> dict[int, dict]:
-        self.progress_cb("Fetching source channels...", 5)
+        self.progress_cb("正在获取源服务器频道...", 5)
         channels = await self.client.get_guild_channels(source_guild_id)
         if not channels:
-            self.progress_cb("No channels found in source server!", 100)
+            self.progress_cb("源服务器中未找到频道！", 100)
             return {}
 
         # Separate categories and children
@@ -55,7 +55,7 @@ class ServerCloner:
         cat_map: dict[int, int] = {}
 
         # 1. Clone categories
-        self.progress_cb(f"Cloning {len(categories)} categories...", 10)
+        self.progress_cb(f"正在克隆 {len(categories)} 个分类...", 10)
         for cat in sorted(categories, key=lambda c: c.position):
             try:
                 new_cat = await self.client.create_category(
@@ -83,13 +83,13 @@ class ServerCloner:
                     "error": str(e),
                 }
             self.progress_cb(
-                f"Cloning categories... ({done}/{len(categories)})",
+            f"正在克隆分类... ({done}/{len(categories)})",
                 10 + int(20 * done / total),
             )
             await asyncio.sleep(0.6)
 
         # 2. Clone channels inside categories
-        self.progress_cb("Cloning channels...", 30)
+        self.progress_cb("正在克隆频道...", 30)
         for parent_id, children in children_by_parent.items():
             target_parent_id = cat_map.get(parent_id)
             if not target_parent_id:
@@ -106,13 +106,13 @@ class ServerCloner:
                     self.mapping[ch.id] = self._error_entry(ch, str(e))
                     done += 1
                 self.progress_cb(
-                    f"Cloning channels... ({done}/{total})",
+            f"正在克隆频道... ({done}/{total})",
                     30 + int(30 * done / total),
                 )
                 await asyncio.sleep(0.6)
 
         # 3. Clone orphans
-        self.progress_cb("Cloning orphan channels...", 60)
+        self.progress_cb("正在克隆独立频道...", 60)
         for ch in sorted(orphans, key=lambda c: c.position):
             try:
                 new_ch = await self._clone_channel(ch, target_guild_id, None)
@@ -123,12 +123,12 @@ class ServerCloner:
                 self.mapping[ch.id] = self._error_entry(ch, str(e))
                 done += 1
             self.progress_cb(
-                f"Cloning channels... ({done}/{total})",
+                f"正在克隆频道... ({done}/{total})",
                 60 + int(20 * done / total),
             )
             await asyncio.sleep(0.6)
 
-        self.progress_cb(f"Cloned {done}/{total} channels", 80)
+        self.progress_cb(f"已克隆 {done}/{total} 个频道", 80)
         return self.mapping
 
     async def _clone_channel(
