@@ -1,132 +1,162 @@
 """
-Discord HTTP API client for self-bot operations.
-Uses raw Discord REST API with aiohttp (user token).
+Discord self-bot client wrapper — uses discord.py-self with proxy support.
 """
 import asyncio
 import logging
 from typing import Optional
 
-import aiohttp
+import discord
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://discord.com/api/v10"
 
+class DiscordSelfClient:
+    """Async Discord self-bot client using discord.py-self."""
 
-class DiscordClient:
-    """Async Discord HTTP client using a user token."""
-
-    def __init__(self, token: str):
+    def __init__(self, token: str, proxy: Optional[str] = None):
         self.token = token
-        self.session: Optional[aiohttp.ClientSession] = None
-        self._user_info: Optional[dict] = None
-
-    @property
-    def headers(self) -> dict:
-        return {
-            "Authorization": self.token,
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        }
+        self.proxy = proxy  # e.g. "http://127.0.0.1:7897"
+        self.client: Optional[discord.Client] = None
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession(headers=self.headers)
+        kwargs = {}
+        if self.proxy:
+            kwargs["proxy"] = self.proxy
+        self.client = discord.Client(**kwargs)
+        await self.client.login(self.token)
         return self
 
     async def __aexit__(self, *args):
-        if self.session:
-            await self.session.close()
-
-    async def _request(self, method: str, path: str, **kwargs) -> dict | list | None:
-        """Make an API request. Returns parsed JSON or None."""
-        url = f"{BASE_URL}{path}"
-        async with self.session.request(method, url, **kwargs) as resp:
-            if resp.status == 429:
-                retry_after = (await resp.json()).get("retry_after", 5)
-                logger.warning(f"Rate limited, waiting {retry_after}s")
-                await asyncio.sleep(retry_after)
-                return await self._request(method, path, **kwargs)
-            if resp.status == 204:
-                return None
-            data = await resp.json()
-            if resp.status >= 400:
-                raise DiscordAPIError(resp.status, data)
-            return data
+        if self.client:
+            await self.client.close()
 
     # ── User ──
 
-    async def get_me(self) -> dict:
-        """Verify token and return user info."""
-        if self._user_info is None:
-            self._user_info = await self._request("GET", "/users/@me")
-        return self._user_info
+    @property
+    def user(self):
+        return self.client.user
 
     # ── Guilds ──
 
-    async def get_my_guilds(self) -> list[dict]:
-        """Get all guilds the user is in."""
-        return await self._request("GET", "/users/@me/guilds")
-
-    async def get_guild(self, guild_id: str) -> dict:
-        """Get a single guild."""
-        return await self._request("GET", f"/guilds/{guild_id}")
-
-    async def get_guild_channels(self, guild_id: str) -> list[dict]:
-        """Get all channels in a guild."""
-        return await self._request("GET", f"/guilds/{guild_id}/channels")
+    async def get_manageable_guilds(self) -> list[discord.Guild]:
+        """Get all guilds the user can manage (MANAGE_GUILD permission or owner)."""
+        all_guilds = await self.client.fetch_guilds()
+        manageable = []
+        for g in all_guilds:
+            perms = g.me.guild_permissions if g.me else discord.Permissions.none()
+            if g.owner_id == self.user.id or perms.manage_guild:
+                manageable.append(g)
+        return manageable
 
     # ── Channels ──
 
-    async def create_channel(
+    async def get_guild_channels(self, guild_id: int) -> list[discord.abc.GuildChannel]:
+        """Fetch all channels in a guild."""
+        guild = await self.client.fetch_guild(guild_id)
+        return await guild.fetch_channels()
+
+    async def create_category(
+        self, guild_id: int, name: str, position: Optional[int] = None
+    ) -> discord.CategoryChannel:
+        guild = await self.client.fetch_guild(guild_id)
+        return await guild.create_category_channel(name, position=position or 0)
+
+    async def create_text_channel(
         self,
-        guild_id: str,
+        guild_id: int,
         name: str,
-        channel_type: int = 0,
-        parent_id: Optional[str] = None,
+        *,
+        parent_id: Optional[int] = None,
         position: Optional[int] = None,
         topic: Optional[str] = None,
         nsfw: bool = False,
-        rate_limit_per_user: Optional[int] = None,
+        slowmode_delay: Optional[int] = None,
+    ) -> discord.TextChannel:
+        guild = await self.client.fetch_guild(guild_id)
+        parent = await self._resolve_parent(guild, parent_id)
+        return await guild.create_text_channel(
+            name,
+            category=parent,
+            position=position or 0,
+            topic=topic,
+            nsfw=nsfw,
+            slowmode_delay=slowmode_delay or 0,
+        )
+
+    async def create_voice_channel(
+        self,
+        guild_id: int,
+        name: str,
+        *,
+        parent_id: Optional[int] = None,
+        position: Optional[int] = None,
         bitrate: Optional[int] = None,
         user_limit: Optional[int] = None,
-    ) -> dict:
-        """Create a channel in a guild.
+    ) -> discord.VoiceChannel:
+        guild = await self.client.fetch_guild(guild_id)
+        parent = await self._resolve_parent(guild, parent_id)
+        return await guild.create_voice_channel(
+            name,
+            category=parent,
+            position=position or 0,
+            bitrate=bitrate,
+            user_limit=user_limit or 0,
+        )
 
-        channel_type: 0=text, 2=voice, 4=category
-        """
-        payload = {"name": name, "type": channel_type}
-        if parent_id is not None:
-            payload["parent_id"] = parent_id
-        if position is not None:
-            payload["position"] = position
-        if topic is not None:
-            payload["topic"] = topic
-        if nsfw:
-            payload["nsfw"] = True
-        if rate_limit_per_user is not None:
-            payload["rate_limit_per_user"] = rate_limit_per_user
-        if bitrate is not None:
-            payload["bitrate"] = bitrate
-        if user_limit is not None:
-            payload["user_limit"] = user_limit
+    async def create_forum_channel(
+        self,
+        guild_id: int,
+        name: str,
+        *,
+        parent_id: Optional[int] = None,
+        position: Optional[int] = None,
+        topic: Optional[str] = None,
+        nsfw: bool = False,
+    ) -> discord.ForumChannel:
+        guild = await self.client.fetch_guild(guild_id)
+        parent = await self._resolve_parent(guild, parent_id)
+        return await guild.create_forum_channel(
+            name,
+            category=parent,
+            position=position or 0,
+            topic=topic,
+            nsfw=nsfw,
+        )
 
-        return await self._request("POST", f"/guilds/{guild_id}/channels", json=payload)
+    async def create_stage_channel(
+        self,
+        guild_id: int,
+        name: str,
+        *,
+        parent_id: Optional[int] = None,
+        position: Optional[int] = None,
+        bitrate: Optional[int] = None,
+    ) -> discord.StageChannel:
+        guild = await self.client.fetch_guild(guild_id)
+        parent = await self._resolve_parent(guild, parent_id)
+        return await guild.create_stage_channel(
+            name,
+            category=parent,
+            position=position or 0,
+            bitrate=bitrate,
+        )
+
+    async def _resolve_parent(
+        self, guild: discord.Guild, parent_id: Optional[int]
+    ) -> Optional[discord.CategoryChannel]:
+        if parent_id is None:
+            return None
+        for cat in guild.categories:
+            if cat.id == parent_id:
+                return cat
+        return None
 
     # ── Webhooks ──
 
-    async def create_webhook(self, channel_id: str, name: str = "CloneHook") -> dict:
-        """Create a webhook in a channel."""
-        return await self._request(
-            "POST", f"/channels/{channel_id}/webhooks", json={"name": name}
-        )
+    async def create_webhook(self, channel_id: int, name: str = "CloneHook") -> discord.Webhook:
+        """Create a webhook in a text-capable channel."""
+        return await self.client.http.create_webhook(channel_id, name=name)
 
-    async def get_channel_webhooks(self, channel_id: str) -> list[dict]:
-        """Get all webhooks in a channel."""
-        return await self._request("GET", f"/channels/{channel_id}/webhooks")
-
-
-class DiscordAPIError(Exception):
-    def __init__(self, status: int, data: dict):
-        self.status = status
-        self.data = data
-        super().__init__(f"Discord API error {status}: {data.get('message', 'unknown')}")
+    async def get_channel_webhooks(self, channel_id: int) -> list[dict]:
+        """Get all webhooks in a channel (returns raw dicts)."""
+        return await self.client.http.channel_webhooks(channel_id)

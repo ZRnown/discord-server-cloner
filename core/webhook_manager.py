@@ -1,65 +1,67 @@
 """
-Webhook manager - creates webhooks and maps source → target.
+Webhook manager — creates webhooks and maps source → target.
 """
 import asyncio
 import logging
 from typing import Callable, Optional
 
-from .discord_client import DiscordClient
+from .discord_client import DiscordSelfClient
 
 logger = logging.getLogger(__name__)
+
+
+WEBHOOK_CHANNEL_TYPES = {"text", "announcement", "forum"}
 
 
 class WebhookManager:
     """Create webhooks in cloned channels and build the mapping."""
 
-    def __init__(self, client: DiscordClient, progress_cb: Optional[Callable] = None):
+    def __init__(self, client: DiscordSelfClient, progress_cb: Optional[Callable] = None):
         self.client = client
         self.progress_cb = progress_cb or (lambda msg, pct: None)
 
-    async def setup_webhooks(
-        self, channel_mapping: dict[str, dict]
-    ) -> dict[str, dict]:
-        """
-        For every cloned channel (not category), create a webhook in both
-        source and target channels and store the mapping.
-        """
-        text_channels = {
+    async def setup_webhooks(self, channel_mapping: dict[int, dict]) -> dict[int, dict]:
+        """For every text-capable cloned channel, create webhooks on both sides."""
+        text_entries = {
             cid: info
             for cid, info in channel_mapping.items()
-            if info.get("type") in ("text", "announcement", "forum")
-            and info.get("target_id") is not None
+            if info.get("type") in WEBHOOK_CHANNEL_TYPES and info.get("target_id") is not None
         }
-        total = len(text_channels)
+        total = len(text_entries)
         if total == 0:
             self.progress_cb("No text channels to webhook...", 90)
             return channel_mapping
 
         done = 0
-        for source_id, info in text_channels.items():
+        for source_id, info in text_entries.items():
             target_id = info["target_id"]
 
-            # Get source webhooks (or create one)
+            # Source webhook
             try:
-                source_webhooks = await self.client.get_channel_webhooks(source_id)
-                if source_webhooks:
-                    source_wh_url = f"https://discord.com/api/webhooks/{source_webhooks[0]['id']}/{source_webhooks[0]['token']}"
+                source_whs = await self.client.get_channel_webhooks(int(source_id))
+                if source_whs:
+                    wh = source_whs[0]
+                    info["source_webhook_url"] = (
+                        f"https://discord.com/api/webhooks/{wh['id']}/{wh['token']}"
+                    )
                 else:
-                    wh = await self.client.create_webhook(source_id, "CloneHook-Source")
-                    source_wh_url = f"https://discord.com/api/webhooks/{wh['id']}/{wh['token']}"
-                channel_mapping[source_id]["source_webhook_url"] = source_wh_url
+                    wh = await self.client.create_webhook(int(source_id), "CloneHook-Source")
+                    info["source_webhook_url"] = (
+                        f"https://discord.com/api/webhooks/{wh['id']}/{wh['token']}"
+                    )
             except Exception as e:
                 logger.error(f"Source webhook for {info['source_name']}: {e}")
-                channel_mapping[source_id]["source_webhook_url"] = f"ERROR: {e}"
+                info["source_webhook_url"] = f"ERROR: {e}"
 
-            # Create webhook in target channel
+            # Target webhook
             try:
-                wh = await self.client.create_webhook(target_id, "CloneHook-Target")
-                target_wh_url = f"https://discord.com/api/webhooks/{wh['id']}/{wh['token']}"
-                channel_mapping[source_id]["target_webhook_url"] = target_wh_url
+                wh = await self.client.create_webhook(int(target_id), "CloneHook-Target")
+                info["target_webhook_url"] = (
+                    f"https://discord.com/api/webhooks/{wh['id']}/{wh['token']}"
+                )
             except Exception as e:
                 logger.error(f"Target webhook for {info['target_name']}: {e}")
-                channel_mapping[source_id]["target_webhook_url"] = f"ERROR: {e}"
+                info["target_webhook_url"] = f"ERROR: {e}"
 
             done += 1
             self.progress_cb(

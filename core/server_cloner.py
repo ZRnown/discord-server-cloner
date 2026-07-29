@@ -1,99 +1,81 @@
 """
-Server structure cloning logic.
-Clones categories and channels from source guild to target guild.
+Server structure cloning logic — uses discord.py-self guild objects.
 """
 import asyncio
 import logging
 from typing import Callable, Optional
 
-from .discord_client import DiscordClient
+import discord
+from .discord_client import DiscordSelfClient
 
 logger = logging.getLogger(__name__)
 
-# Channel type constants
-CHANNEL_TEXT = 0
-CHANNEL_VOICE = 2
-CHANNEL_CATEGORY = 4
-CHANNEL_ANNOUNCEMENT = 5
-CHANNEL_STAGE = 13
-CHANNEL_FORUM = 15
-
-# Channel types that go inside categories (not categories themselves)
 CHILD_TYPES = {
-    CHANNEL_TEXT: "text",
-    CHANNEL_VOICE: "voice",
-    CHANNEL_ANNOUNCEMENT: "announcement",
-    CHANNEL_STAGE: "stage",
-    CHANNEL_FORUM: "forum",
+    discord.ChannelType.text: "text",
+    discord.ChannelType.voice: "voice",
+    discord.ChannelType.news: "announcement",
+    discord.ChannelType.stage_voice: "stage",
+    discord.ChannelType.forum: "forum",
 }
 
 
 class ServerCloner:
-    """Clone server structure from source to target guild."""
+    """Clone categories + channels from source guild to target guild."""
 
-    def __init__(self, client: DiscordClient, progress_cb: Optional[Callable] = None):
+    def __init__(self, client: DiscordSelfClient, progress_cb: Optional[Callable] = None):
         self.client = client
         self.progress_cb = progress_cb or (lambda msg, pct: None)
-        # Mapping: {source_channel_id: {source, target, webhook_url}}
-        self.mapping: dict[str, dict] = {}
+        self.mapping: dict[int, dict] = {}
 
-    async def clone(
-        self, source_guild_id: str, target_guild_id: str
-    ) -> dict[str, dict]:
-        """Clone server structure. Returns channel mapping."""
+    async def clone(self, source_guild_id: int, target_guild_id: int) -> dict[int, dict]:
         self.progress_cb("Fetching source channels...", 5)
-        source_channels = await self.client.get_guild_channels(source_guild_id)
-
-        if not source_channels:
+        channels = await self.client.get_guild_channels(source_guild_id)
+        if not channels:
             self.progress_cb("No channels found in source server!", 100)
             return {}
 
-        # Build hierarchy: categories first, then their children, then orphans
-        categories = [
-            c for c in source_channels if c["type"] == CHANNEL_CATEGORY
-        ]
-        orphans = [
-            c
-            for c in source_channels
-            if c["type"] in CHILD_TYPES and not c.get("parent_id")
-        ]
-        children_by_parent: dict[str, list[dict]] = {}
-        for c in source_channels:
-            if c["type"] in CHILD_TYPES and c.get("parent_id"):
-                children_by_parent.setdefault(c["parent_id"], []).append(c)
+        # Separate categories and children
+        categories = [c for c in channels if isinstance(c, discord.CategoryChannel)]
+        children_by_parent: dict[int, list[discord.abc.GuildChannel]] = {}
+        orphans: list[discord.abc.GuildChannel] = []
 
-        total = len(source_channels)
+        for c in channels:
+            if isinstance(c, discord.CategoryChannel):
+                continue
+            if c.type not in CHILD_TYPES:
+                continue
+            pid = getattr(c, "category_id", None) or (c.category.id if c.category else None)
+            if pid:
+                children_by_parent.setdefault(pid, []).append(c)
+            else:
+                orphans.append(c)
+
+        total = len(channels)
         done = 0
-
-        # Track category mapping: source_id → target_id
-        cat_map: dict[str, str] = {}
-
-        self.progress_cb(f"Cloning {len(categories)} categories...", 10)
+        cat_map: dict[int, int] = {}
 
         # 1. Clone categories
-        for cat in sorted(categories, key=lambda c: c.get("position", 0)):
+        self.progress_cb(f"Cloning {len(categories)} categories...", 10)
+        for cat in sorted(categories, key=lambda c: c.position):
             try:
-                new_cat = await self.client.create_channel(
-                    guild_id=target_guild_id,
-                    name=cat["name"],
-                    channel_type=CHANNEL_CATEGORY,
-                    position=cat.get("position"),
+                new_cat = await self.client.create_category(
+                    target_guild_id, cat.name, position=cat.position
                 )
-                cat_map[cat["id"]] = new_cat["id"]
-                self.mapping[cat["id"]] = {
-                    "source_id": cat["id"],
-                    "source_name": cat["name"],
-                    "target_id": new_cat["id"],
-                    "target_name": new_cat["name"],
+                cat_map[cat.id] = new_cat.id
+                self.mapping[cat.id] = {
+                    "source_id": str(cat.id),
+                    "source_name": cat.name,
+                    "target_id": str(new_cat.id),
+                    "target_name": new_cat.name,
                     "type": "category",
                     "webhook_url": None,
                 }
                 done += 1
             except Exception as e:
-                logger.error(f"Failed to clone category {cat['name']}: {e}")
-                self.mapping[cat["id"]] = {
-                    "source_id": cat["id"],
-                    "source_name": cat["name"],
+                logger.error(f"Failed to clone category {cat.name}: {e}")
+                self.mapping[cat.id] = {
+                    "source_id": str(cat.id),
+                    "source_name": cat.name,
                     "target_id": None,
                     "target_name": None,
                     "type": "category",
@@ -101,104 +83,118 @@ class ServerCloner:
                     "error": str(e),
                 }
             self.progress_cb(
-                f"Cloning categories... ({done}/{len(categories)})", 10 + int(20 * done / total)
+                f"Cloning categories... ({done}/{len(categories)})",
+                10 + int(20 * done / total),
             )
-            await asyncio.sleep(0.5)  # Rate limit safety
+            await asyncio.sleep(0.6)
 
         # 2. Clone channels inside categories
-        self.progress_cb("Cloning channels inside categories...", 30)
+        self.progress_cb("Cloning channels...", 30)
         for parent_id, children in children_by_parent.items():
             target_parent_id = cat_map.get(parent_id)
             if not target_parent_id:
-                logger.warning(f"No target category for source parent {parent_id}, skipping child channels")
+                logger.warning(f"No target category for {parent_id}, skipping child channels")
                 done += len(children)
                 continue
-            for ch in sorted(children, key=lambda c: c.get("position", 0)):
+            for ch in sorted(children, key=lambda c: c.position):
                 try:
-                    ch_type = ch["type"]
-                    if ch_type not in CHILD_TYPES:
-                        continue
-                    new_ch = await self.client.create_channel(
-                        guild_id=target_guild_id,
-                        name=ch["name"],
-                        channel_type=ch_type,
-                        parent_id=target_parent_id,
-                        position=ch.get("position"),
-                        topic=ch.get("topic", ""),
-                        nsfw=ch.get("nsfw", False),
-                        rate_limit_per_user=ch.get("rate_limit_per_user", 0) or None,
-                        bitrate=ch.get("bitrate"),
-                        user_limit=ch.get("user_limit"),
-                    )
-                    self.mapping[ch["id"]] = {
-                        "source_id": ch["id"],
-                        "source_name": ch["name"],
-                        "target_id": new_ch["id"],
-                        "target_name": new_ch["name"],
-                        "type": CHILD_TYPES[ch_type],
-                        "webhook_url": None,
-                    }
+                    new_ch = await self._clone_channel(ch, target_guild_id, target_parent_id)
+                    self._record_mapping(ch, new_ch)
                     done += 1
                 except Exception as e:
-                    logger.error(f"Failed to clone channel {ch['name']}: {e}")
-                    self.mapping[ch["id"]] = {
-                        "source_id": ch["id"],
-                        "source_name": ch["name"],
-                        "target_id": None,
-                        "target_name": None,
-                        "type": CHILD_TYPES.get(ch["type"], "unknown"),
-                        "webhook_url": None,
-                        "error": str(e),
-                    }
+                    logger.error(f"Failed to clone channel {ch.name}: {e}")
+                    self.mapping[ch.id] = self._error_entry(ch, str(e))
                     done += 1
                 self.progress_cb(
-                    f"Cloning channels... ({done}/{total})", 30 + int(30 * done / total)
+                    f"Cloning channels... ({done}/{total})",
+                    30 + int(30 * done / total),
                 )
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.6)
 
-        # 3. Clone orphan channels (no category)
+        # 3. Clone orphans
         self.progress_cb("Cloning orphan channels...", 60)
-        for ch in sorted(orphans, key=lambda c: c.get("position", 0)):
+        for ch in sorted(orphans, key=lambda c: c.position):
             try:
-                ch_type = ch["type"]
-                if ch_type not in CHILD_TYPES:
-                    continue
-                new_ch = await self.client.create_channel(
-                    guild_id=target_guild_id,
-                    name=ch["name"],
-                    channel_type=ch_type,
-                    position=ch.get("position"),
-                    topic=ch.get("topic", ""),
-                    nsfw=ch.get("nsfw", False),
-                    rate_limit_per_user=ch.get("rate_limit_per_user", 0) or None,
-                    bitrate=ch.get("bitrate"),
-                    user_limit=ch.get("user_limit"),
-                )
-                self.mapping[ch["id"]] = {
-                    "source_id": ch["id"],
-                    "source_name": ch["name"],
-                    "target_id": new_ch["id"],
-                    "target_name": new_ch["name"],
-                    "type": CHILD_TYPES[ch_type],
-                    "webhook_url": None,
-                }
+                new_ch = await self._clone_channel(ch, target_guild_id, None)
+                self._record_mapping(ch, new_ch)
                 done += 1
             except Exception as e:
-                logger.error(f"Failed to clone orphan channel {ch['name']}: {e}")
-                self.mapping[ch["id"]] = {
-                    "source_id": ch["id"],
-                    "source_name": ch["name"],
-                    "target_id": None,
-                    "target_name": None,
-                    "type": CHILD_TYPES.get(ch["type"], "unknown"),
-                    "webhook_url": None,
-                    "error": str(e),
-                }
+                logger.error(f"Failed to clone orphan channel {ch.name}: {e}")
+                self.mapping[ch.id] = self._error_entry(ch, str(e))
                 done += 1
             self.progress_cb(
-                f"Cloning channels... ({done}/{total})", 60 + int(20 * done / total)
+                f"Cloning channels... ({done}/{total})",
+                60 + int(20 * done / total),
             )
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.6)
 
         self.progress_cb(f"Cloned {done}/{total} channels", 80)
         return self.mapping
+
+    async def _clone_channel(
+        self,
+        ch: discord.abc.GuildChannel,
+        target_guild_id: int,
+        target_parent_id: Optional[int],
+    ) -> discord.abc.GuildChannel:
+        ch_type = ch.type
+        if ch_type == discord.ChannelType.text:
+            slowmode = getattr(ch, "slowmode_delay", 0) or 0
+            return await self.client.create_text_channel(
+                target_guild_id, ch.name,
+                parent_id=target_parent_id, position=ch.position,
+                topic=getattr(ch, "topic", None),
+                nsfw=getattr(ch, "nsfw", False),
+                slowmode_delay=slowmode if slowmode > 0 else None,
+            )
+        elif ch_type == discord.ChannelType.news:
+            slowmode = getattr(ch, "slowmode_delay", 0) or 0
+            return await self.client.create_text_channel(
+                target_guild_id, ch.name,
+                parent_id=target_parent_id, position=ch.position,
+                topic=getattr(ch, "topic", None),
+                nsfw=getattr(ch, "nsfw", False),
+                slowmode_delay=slowmode if slowmode > 0 else None,
+            )
+        elif ch_type == discord.ChannelType.voice:
+            return await self.client.create_voice_channel(
+                target_guild_id, ch.name,
+                parent_id=target_parent_id, position=ch.position,
+                bitrate=getattr(ch, "bitrate", None),
+                user_limit=getattr(ch, "user_limit", None),
+            )
+        elif ch_type == discord.ChannelType.stage_voice:
+            return await self.client.create_stage_channel(
+                target_guild_id, ch.name,
+                parent_id=target_parent_id, position=ch.position,
+                bitrate=getattr(ch, "bitrate", None),
+            )
+        elif ch_type == discord.ChannelType.forum:
+            return await self.client.create_forum_channel(
+                target_guild_id, ch.name,
+                parent_id=target_parent_id, position=ch.position,
+                topic=getattr(ch, "topic", None),
+                nsfw=getattr(ch, "nsfw", False),
+            )
+        raise ValueError(f"Unsupported channel type: {ch_type}")
+
+    def _record_mapping(self, src: discord.abc.GuildChannel, tgt: discord.abc.GuildChannel):
+        self.mapping[src.id] = {
+            "source_id": str(src.id),
+            "source_name": src.name,
+            "target_id": str(tgt.id),
+            "target_name": tgt.name,
+            "type": CHILD_TYPES.get(src.type, str(src.type)),
+            "webhook_url": None,
+        }
+
+    def _error_entry(self, ch: discord.abc.GuildChannel, error: str) -> dict:
+        return {
+            "source_id": str(ch.id),
+            "source_name": ch.name,
+            "target_id": None,
+            "target_name": None,
+            "type": CHILD_TYPES.get(ch.type, str(ch.type)),
+            "webhook_url": None,
+            "error": error,
+        }
