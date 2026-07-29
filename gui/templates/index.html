@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Discord Server Cloner</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <h1>Discord Server Cloner</h1>
+      <p class="subtitle">Clone server structure &amp; webhook mappings with GUI</p>
+    </header>
+
+    <!-- Step 1: Token -->
+    <section id="step-token" class="card">
+      <div class="step-badge">1</div>
+      <h2>Discord Token</h2>
+      <p class="hint">Enter your Discord user token. It is never saved to disk.</p>
+      <div class="input-row">
+        <input type="password" id="token-input" placeholder="Paste your Discord token here..." autocomplete="off">
+        <button id="btn-verify" class="btn btn-primary">Verify &amp; Load Servers</button>
+      </div>
+      <div id="verify-status" class="status"></div>
+    </section>
+
+    <!-- Step 2: Server Selection -->
+    <section id="step-servers" class="card hidden">
+      <div class="step-badge">2</div>
+      <h2>Select Servers</h2>
+      <div class="server-selects">
+        <div class="select-group">
+          <label>Source Server <span>(structure to copy FROM)</span></label>
+          <select id="source-server">
+            <option value="">-- Select source server --</option>
+          </select>
+        </div>
+        <div class="arrow">→</div>
+        <div class="select-group">
+          <label>Target Server <span>(structure to copy TO)</span></label>
+          <select id="target-server">
+            <option value="">-- Select target server --</option>
+          </select>
+        </div>
+      </div>
+      <button id="btn-clone" class="btn btn-primary" disabled>Start Clone</button>
+      <div id="clone-status" class="status"></div>
+    </section>
+
+    <!-- Step 3: Progress -->
+    <section id="step-progress" class="card hidden">
+      <div class="step-badge">3</div>
+      <h2>Progress</h2>
+      <div class="progress-bar-container">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+      <p id="progress-text" class="progress-text">Waiting...</p>
+    </section>
+
+    <!-- Step 4: Results -->
+    <section id="step-results" class="card hidden">
+      <div class="step-badge">4</div>
+      <h2>Results &amp; Export</h2>
+      <div id="result-summary" class="result-summary"></div>
+      <div class="export-buttons">
+        <button class="btn btn-secondary" onclick="exportMapping('json')">Export JSON</button>
+        <button class="btn btn-secondary" onclick="exportMapping('csv')">Export CSV</button>
+        <button class="btn btn-secondary" onclick="exportMapping('markdown')">Export Markdown</button>
+        <button class="btn btn-outline" onclick="downloadMapping('json')">Download .json</button>
+        <button class="btn btn-outline" onclick="downloadMapping('csv')">Download .csv</button>
+      </div>
+      <div class="table-container" id="mapping-table-container"></div>
+    </section>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
